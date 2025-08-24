@@ -4,3 +4,4 @@ numpy
 matplotlib
 nsepython>=2.9
 streamlit-autorefresh
+pytz
