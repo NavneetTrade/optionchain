@@ -14,14 +14,11 @@ try:
     AUTORFR = True
 except ImportError:
     AUTORFR = False
-'''# Auto-refresh only during market hours
+# Auto-refresh only during market hours
 def is_market_open():
     ist = pytz.timezone("Asia/Kolkata")
     now = datetime.now(ist).time()
     return time(9, 15) <= now <= time(15, 30)
-
-if is_market_open():
-    st_autorefresh(interval=60 * 1000, key="datarefresh")'''
 
 from nsepython import nse_optionchain_scrapper
 
@@ -66,7 +63,7 @@ with st.sidebar:
     refresh_sec = st.slider("Auto-Refresh (sec)", 10, 60, 30)
     st.caption("Install `streamlit-autorefresh` for auto refresh.")
 
-if AUTORFR:
+if AUTORFR and is_market_open():
     st_autorefresh(interval=refresh_sec * 1000, key="oc_refresh")
 
 if "prev_buckets" not in st.session_state:
