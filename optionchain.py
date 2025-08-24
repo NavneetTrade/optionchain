@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, time
 from typing import Optional
 
 import pandas as pd
@@ -8,7 +8,6 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import numpy as np
 import pytz
-import time
 
 # Optional auto-refresh
 try:
