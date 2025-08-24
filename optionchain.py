@@ -8,7 +8,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 import numpy as np
 import pytz
-
+import time
 
 # Optional auto-refresh
 try:
