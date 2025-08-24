@@ -14,6 +14,14 @@ try:
     AUTORFR = True
 except ImportError:
     AUTORFR = False
+# Auto-refresh only during market hours
+def is_market_open():
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist).time()
+    return time(9, 15) <= now <= time(15, 30)
+
+if is_market_open():
+    st_autorefresh(interval=60 * 1000, key="datarefresh")
 
 from nsepython import nse_optionchain_scrapper
 
