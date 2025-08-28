@@ -146,33 +146,42 @@ table = pd.DataFrame(flat)
 # ----------------------------
 # Grouped Chart: OI, ChgOI, Volume
 # ----------------------------
+# ----------------------------
+# Chart with dual axis
+# ----------------------------
 st.subheader("OI, ChgOI & Volume Distribution")
-fig, ax = plt.subplots(figsize=(14, 6))
-bar_width = 0.12
+fig, ax1 = plt.subplots(figsize=(14, 6))
+
 indices = np.arange(len(table))
+bar_width = 0.2
 
-# CE OI & PE OI
-ax.bar(indices - 0.3, table["CE_OI"], bar_width, color="#1f77b4", label="CE OI")
-ax.bar(indices - 0.18, table["PE_OI"], bar_width, color="#2ca02c", label="PE OI")
+# Left axis → OI & ChgOI
+ax1.bar(indices - 0.2, table["CE_OI"], bar_width, color="#1f77b4", label="CE OI")
+ax1.bar(indices, table["PE_OI"], bar_width, color="#2ca02c", label="PE OI")
+ax1.bar(indices + 0.2, table["CE_ChgOI"], bar_width, color="#aec7e8", label="CE ChgOI")
+ax1.bar(indices + 0.4, table["PE_ChgOI"], bar_width, color="#98df8a", label="PE ChgOI")
 
-# CE ChgOI & PE ChgOI
-ax.bar(indices - 0.06, table["CE_ChgOI"], bar_width, color="#aec7e8", label="CE ChgOI")
-ax.bar(indices + 0.06, table["PE_ChgOI"], bar_width, color="#98df8a", label="PE ChgOI")
+ax1.set_ylabel("OI / ChgOI")
+ax1.set_xticks(indices)
+ax1.set_xticklabels(table["Strike"], rotation=45)
 
-# CE Volume & PE Volume
-ax.bar(indices + 0.18, table["CE_Volume"], bar_width, color="#ffbb78", label="CE Volume")
-ax.bar(indices + 0.3, table["PE_Volume"], bar_width, color="#f7b6d2", label="PE Volume")
+# Right axis → Volume
+ax2 = ax1.twinx()
+ax2.plot(indices, table["CE_Volume"], marker="o", color="#ff7f0e", label="CE Volume")
+ax2.plot(indices, table["PE_Volume"], marker="o", color="#d62728", label="PE Volume")
+ax2.set_ylabel("Volume")
 
-# X-axis labels
-ax.set_xticks(indices)
-ax.set_xticklabels(table["Strike"], rotation=45)
-ax.axhline(0, color='gray', linewidth=0.8)
-ax.axvline(len(indices)//2, color="red", linestyle="--", label=f"Spot {spot}")
-ax.set_xlabel("Strike Price")
-ax.set_ylabel("Value")
-ax.set_title(f"OI, ChgOI & Volume for {symbol} ({itm_count} ITM each side)")
-ax.legend(ncol=3)
+# Spot line
+ax1.axvline(len(indices)//2, color="red", linestyle="--", label=f"Spot {spot}")
+
+# Merge legends
+lines, labels = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines + lines2, labels + labels2, ncol=3)
+
+ax1.set_title(f"OI, ChgOI & Volume for {symbol} ({itm_count} ITM each side)")
 st.pyplot(fig)
+
 
 # ----------------------------
 # Bucket summaries
