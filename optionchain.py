@@ -167,7 +167,7 @@ ax1.set_xticklabels(table["Strike"], rotation=45)
 
 # Right axis → Volume
 ax2 = ax1.twinx()
-ax2.plot(indices, table["CE_Volume"], marker="o", color="#ff7f0e", label="CE Volume")
+ax2.plot(indices, table["CE_Volume"], marker="o", color="#03fc7f", label="CE Volume")
 ax2.plot(indices, table["PE_Volume"], marker="o", color="#d62728", label="PE Volume")
 ax2.set_ylabel("Volume")
 
