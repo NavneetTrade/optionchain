@@ -56,10 +56,39 @@ def trend_badge(curr: float, prev: Optional[float]) -> str:
 st.set_page_config(page_title="NSE Option Chain", layout="wide")
 st.title("📊 NSE Option Chain Dashboard")
 
+# Initialize session state for symbol persistence
+if "selected_symbol" not in st.session_state:
+    st.session_state.selected_symbol = "NIFTY"
+
+if "prev_buckets" not in st.session_state:
+    st.session_state.prev_buckets = None
+
 with st.sidebar:
     from nsepython import fnolist
     fno_list = [x for x in fnolist()]
-    symbol = st.selectbox("Symbol", fno_list, index=0)
+    
+    # Find the index of currently selected symbol
+    try:
+        current_index = fno_list.index(st.session_state.selected_symbol)
+    except ValueError:
+        current_index = 0
+        st.session_state.selected_symbol = fno_list[0]
+    
+    # Symbol selection with persistent state
+    symbol = st.selectbox(
+        "Symbol", 
+        fno_list, 
+        index=current_index,
+        key="symbol_selector"
+    )
+    
+    # Update session state when symbol changes
+    if symbol != st.session_state.selected_symbol:
+        st.session_state.selected_symbol = symbol
+    
+    # Use the session state symbol
+    symbol = st.session_state.selected_symbol
+    
     itm_count = st.radio("ITM Strikes", [3, 5], index=1)
     refresh_sec = st.slider("Auto-Refresh (sec)", 10, 60, 30)
     st.caption("Install `streamlit-autorefresh` for auto refresh.")
@@ -67,13 +96,10 @@ with st.sidebar:
 if AUTORFR and is_market_open():
     st_autorefresh(interval=refresh_sec * 1000, key="oc_refresh")
 
-if "prev_buckets" not in st.session_state:
-    st.session_state.prev_buckets = None
-
 # ----------------------------
 # Fetch data
 # ----------------------------
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=30)
 def fetch_oc(sym: str):
     return nse_optionchain_scrapper(sym)
 
@@ -291,6 +317,21 @@ table = table[[
     "PE_OI", "PE_LTP", "PE_Volume", "PE_ChgOI", "PE_IV"
 ]]
 
+# Function to format numbers in K/L/Cr format for table
+def format_table_number(num):
+    """Format numbers for table display in K/L/Cr format"""
+    if pd.isna(num):
+        return "0"
+    num = float(num)
+    if abs(num) >= 10000000:  # 1 crore
+        return f"{num/10000000:.2f}Cr"
+    elif abs(num) >= 100000:  # 1 lakh
+        return f"{num/100000:.2f}L"
+    elif abs(num) >= 1000:
+        return f"{num/1000:.2f}K"
+    else:
+        return f"{num:.0f}" if num == int(num) else f"{num:.2f}"
+
 st.subheader(f"Table ({itm_count} ITM each side)")
 styled = (
     table.style
@@ -300,11 +341,11 @@ styled = (
     .applymap(lambda v: cell_green(v, pe_oi_max), subset=["PE_OI"])
     .applymap(lambda v: cell_green(v, pe_vol_max), subset=["PE_Volume"])
     .format({
-        "CE_OI": "{:,.0f}", "CE_LTP": "{:,.2f}", "CE_Volume": "{:,.0f}",
-        "CE_ChgOI": "{:,.0f}", "CE_IV": "{:.2f}",
+        "CE_OI": format_table_number, "CE_LTP": "{:,.2f}", "CE_Volume": format_table_number,
+        "CE_ChgOI": format_table_number, "CE_IV": "{:.2f}",
         "Strike": "{:,.0f}",
-        "PE_OI": "{:,.0f}", "PE_LTP": "{:,.2f}", "PE_Volume": "{:,.0f}",
-        "PE_ChgOI": "{:,.0f}", "PE_IV": "{:.2f}",
+        "PE_OI": format_table_number, "PE_LTP": "{:,.2f}", "PE_Volume": format_table_number,
+        "PE_ChgOI": format_table_number, "PE_IV": "{:.2f}",
     })
 )
 
