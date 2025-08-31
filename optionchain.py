@@ -2,12 +2,14 @@ import os
 import json
 from datetime import datetime, time
 from typing import Optional
+import math
 
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import numpy as np
 import pytz
+from scipy.stats import norm
 
 # Optional auto-refresh
 try:
@@ -23,6 +25,61 @@ def is_market_open():
     return time(9, 15) <= now <= time(15, 30)
 
 from nsepython import nse_optionchain_scrapper
+
+# ----------------------------
+# Black-Scholes Greeks Calculator
+# ----------------------------
+def calculate_greeks(S, K, T, r, sigma, option_type='call'):
+    """
+    Calculate Black-Scholes Greeks
+    S: Current stock price
+    K: Strike price
+    T: Time to expiration (in years)
+    r: Risk-free rate
+    sigma: Volatility (implied volatility)
+    option_type: 'call' or 'put'
+    """
+    if T <= 0 or sigma <= 0:
+        return {'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0}
+    
+    try:
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        
+        # Standard normal CDF and PDF
+        N_d1 = norm.cdf(d1)
+        N_d2 = norm.cdf(d2)
+        n_d1 = norm.pdf(d1)  # PDF for gamma, vega, theta calculations
+        
+        if option_type == 'call':
+            delta = N_d1
+            theta = (-S * n_d1 * sigma / (2 * math.sqrt(T)) - r * K * math.exp(-r * T) * N_d2) / 365
+        else:  # put
+            delta = N_d1 - 1
+            theta = (-S * n_d1 * sigma / (2 * math.sqrt(T)) + r * K * math.exp(-r * T) * norm.cdf(-d2)) / 365
+        
+        # Gamma and Vega are same for calls and puts
+        gamma = n_d1 / (S * sigma * math.sqrt(T))
+        vega = S * n_d1 * math.sqrt(T) / 100  # Divided by 100 for percentage volatility
+        
+        return {
+            'delta': delta,
+            'gamma': gamma,
+            'theta': theta,
+            'vega': vega
+        }
+    except:
+        return {'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0}
+
+def get_time_to_expiry(expiry_date):
+    """Calculate time to expiry in years"""
+    try:
+        expiry = datetime.strptime(expiry_date, "%d-%b-%Y")
+        now = datetime.now()
+        days_to_expiry = (expiry - now).days
+        return max(days_to_expiry / 365.0, 1/365)  # Minimum 1 day
+    except:
+        return 1/365  # Default to 1 day if parsing fails
 
 # ----------------------------
 # Utility functions
@@ -110,8 +167,6 @@ def get_pcr_signal(pcr_value: float, metric_type: str = "OI") -> str:
         else:
             return "➡️ **Neutral**"
     elif metric_type == "ChgOI":
-        # REVERSED: For Change in OI, LOWER PCR indicates bearish (call unwinding/put building)
-        # HIGHER PCR indicates bullish (put unwinding/call building)
         if pcr_value > 1.5:
             return "🔺 **Strong Bullish**"
         elif pcr_value > 1.0:
@@ -123,15 +178,12 @@ def get_pcr_signal(pcr_value: float, metric_type: str = "OI") -> str:
         else:
             return "➡️ **Neutral**"
     else:  # Volume
-        # For Volume, similar to ChgOI but slightly different thresholds
         if pcr_value > 1.3:
             return "🔻 **Bearish**"
         elif pcr_value < 0.7:
             return "🔺 **Bullish**"
         else:
             return "➡️ **Neutral**"
-
-
 
 def calculate_comprehensive_sentiment_score(table_data, bucket_summary, pcr_data, spot_price) -> dict:
     """
@@ -240,11 +292,11 @@ def calculate_comprehensive_sentiment_score(table_data, bucket_summary, pcr_data
     
     # Bullish positions
     bullish_ce = ce_positions.get("Long Build", 0) + ce_positions.get("Short Covering", 0)
-    bullish_pe = pe_positions.get("Long Unwinding", 0) + pe_positions.get("Short Buildup", 0)  # For puts, these are bearish for underlying
+    bullish_pe = pe_positions.get("Long Unwinding", 0) + pe_positions.get("Short Buildup", 0)
     
     # Bearish positions  
     bearish_ce = ce_positions.get("Short Buildup", 0) + ce_positions.get("Long Unwinding", 0)
-    bearish_pe = pe_positions.get("Long Build", 0) + pe_positions.get("Short Covering", 0)  # For puts, these are bullish for underlying
+    bearish_pe = pe_positions.get("Long Build", 0) + pe_positions.get("Short Covering", 0)
     
     total_strikes = len(table_data)
     
@@ -252,7 +304,7 @@ def calculate_comprehensive_sentiment_score(table_data, bucket_summary, pcr_data
     net_bullish_activity = (bullish_ce - bearish_ce) + (bullish_pe - bearish_pe)
     position_bias_pct = (net_bullish_activity / total_strikes) * 100
     
-    position_score = max(-100, min(100, position_bias_pct * 10))  # Scale to -100 to +100
+    position_score = max(-100, min(100, position_bias_pct * 10))
     
     scores["position_distribution"] = position_score
     
@@ -270,44 +322,28 @@ def calculate_comprehensive_sentiment_score(table_data, bucket_summary, pcr_data
     if final_score >= 60:
         sentiment = "STRONG BULLISH"
         confidence = "HIGH"
-        description = "Multiple strong bullish indicators across price action, OI, and fresh activity"
-        action = "Consider aggressive bullish strategies - ATM/OTM calls, bull spreads"
     elif final_score >= 30:
         sentiment = "BULLISH"
         confidence = "HIGH"
-        description = "Clear bullish bias with supporting indicators"
-        action = "Consider bullish strategies - ITM calls, bull call spreads"
     elif final_score >= 15:
         sentiment = "BULLISH BIAS"
         confidence = "MEDIUM"
-        description = "Mild bullish tilt, some supporting factors"
-        action = "Cautiously bullish - consider call spreads with risk management"
     elif final_score <= -60:
         sentiment = "STRONG BEARISH"
         confidence = "HIGH" 
-        description = "Multiple strong bearish indicators across all parameters"
-        action = "Consider aggressive bearish strategies - ATM/OTM puts, bear spreads"
     elif final_score <= -30:
         sentiment = "BEARISH"
         confidence = "HIGH"
-        description = "Clear bearish bias with supporting indicators"
-        action = "Consider bearish strategies - ITM puts, bear put spreads"
     elif final_score <= -15:
         sentiment = "BEARISH BIAS"
         confidence = "MEDIUM"
-        description = "Mild bearish tilt, some supporting factors"
-        action = "Cautiously bearish - consider put spreads with risk management"
     else:
         sentiment = "NEUTRAL"
         confidence = "MEDIUM"
-        description = "Mixed signals or balanced market conditions"
-        action = "Consider neutral strategies - straddles, strangles, iron condors"
     
     return {
         "sentiment": sentiment,
         "confidence": confidence,
-        "description": description,
-        "action_suggestion": action,
         "final_score": final_score,
         "component_scores": scores,
         "score_breakdown": {
@@ -359,6 +395,7 @@ with st.sidebar:
     
     itm_count = st.radio("ITM Strikes", [3, 5], index=1)
     refresh_sec = st.slider("Auto-Refresh (sec)", 10, 60, 30)
+    risk_free_rate = st.number_input("Risk-free Rate (%)", value=5.84, min_value=0.0, max_value=15.0, step=0.1) / 100
     st.caption("Install `streamlit-autorefresh` for auto refresh.")
 
 if AUTORFR and is_market_open():
@@ -380,6 +417,9 @@ spot = float(data["records"]["underlyingValue"])
 expiry_list = data["records"]["expiryDates"] or []
 selected_expiry = st.selectbox("Select Expiry", expiry_list, index=0)
 
+# Calculate time to expiry
+time_to_expiry = get_time_to_expiry(selected_expiry)
+
 # Save snapshot
 os.makedirs("snapshots", exist_ok=True)
 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -392,7 +432,7 @@ st.markdown(
     f"""
 <div style="background-color:#0A71E2;padding:12px;border-radius:12px;text-align:center;margin-bottom:12px">
   <div style="color:#fff;font-size:24px;font-weight:700;">{symbol} Spot: {spot}</div>
-  <div style="color:#D8E9FF;font-size:16px;">Expiry: {selected_expiry}</div>
+  <div style="color:#D8E9FF;font-size:16px;">Expiry: {selected_expiry} | Time to Expiry: {time_to_expiry*365:.0f} days</div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -412,8 +452,9 @@ df.sort_values("strikePrice", inplace=True, ignore_index=True)
 atm_idx = df["strikePrice"].sub(spot).abs().idxmin()
 atm_strike = float(df.loc[atm_idx, "strikePrice"])
 
-below_df = df[df["strikePrice"] < spot].tail(itm_count)
-above_df = df[df["strikePrice"] > spot].head(itm_count)
+# Fixed strike selection to maintain consistent positioning
+below_df = df[df["strikePrice"] < atm_strike].tail(itm_count)
+above_df = df[df["strikePrice"] > atm_strike].head(itm_count)
 atm_row = df.loc[[atm_idx]]
 
 show_df = pd.concat([below_df, atm_row, above_df], axis=0).drop_duplicates(subset=["strikePrice"]).reset_index(drop=True)
@@ -434,21 +475,37 @@ for _, r in show_df.iterrows():
     ce_position = get_position_signal(ce_ltp, ce_change, ce_chg_oi)
     pe_position = get_position_signal(pe_ltp, pe_change, pe_chg_oi)
     
+    # Calculate Greeks using Black-Scholes
+    strike_price = float(r["strikePrice"])
+    ce_iv = float(g(ce, "impliedVolatility")) / 100 if g(ce, "impliedVolatility") else 0.2  # Default 20% if no IV
+    pe_iv = float(g(pe, "impliedVolatility")) / 100 if g(pe, "impliedVolatility") else 0.2
+    
+    ce_greeks = calculate_greeks(spot, strike_price, time_to_expiry, risk_free_rate, ce_iv, 'call')
+    pe_greeks = calculate_greeks(spot, strike_price, time_to_expiry, risk_free_rate, pe_iv, 'put')
+    
     flat.append({
         "CE_OI": float(g(ce, "openInterest")),
         "CE_LTP": ce_ltp,
         "CE_Change": ce_change,
         "CE_Volume": float(g(ce, "totalTradedVolume")),
         "CE_ChgOI": ce_chg_oi,
-        "CE_IV": float(g(ce, "impliedVolatility")),
+        "CE_IV": ce_iv * 100,  # Convert back to percentage for display
+        "CE_Delta": ce_greeks['delta'],
+        "CE_Gamma": ce_greeks['gamma'],
+        "CE_Theta": ce_greeks['theta'],
+        "CE_Vega": ce_greeks['vega'],
         "CE_Position": ce_position,
-        "Strike": float(r["strikePrice"]),
+        "Strike": strike_price,
         "PE_OI": float(g(pe, "openInterest")),
         "PE_LTP": pe_ltp,
         "PE_Change": pe_change,
         "PE_Volume": float(g(pe, "totalTradedVolume")),
         "PE_ChgOI": pe_chg_oi,
-        "PE_IV": float(g(pe, "impliedVolatility")),
+        "PE_IV": pe_iv * 100,  # Convert back to percentage for display
+        "PE_Delta": pe_greeks['delta'],
+        "PE_Gamma": pe_greeks['gamma'],
+        "PE_Theta": pe_greeks['theta'],
+        "PE_Vega": pe_greeks['vega'],
         "PE_Position": pe_position,
     })
 
@@ -484,8 +541,10 @@ ax2.plot(indices, table["CE_Volume"], marker="o", color="#03fc7f", label="CE Vol
 ax2.plot(indices, table["PE_Volume"], marker="o", color="#d62728", label="PE Volume")
 ax2.set_ylabel("Volume")
 
-# Spot line
-ax1.axvline(len(indices)//2, color="red", linestyle="--", label=f"Spot {spot}")
+# Spot line - fixed to show at ATM position
+atm_position = table.index[table["Strike"] == atm_strike].tolist()
+if atm_position:
+    ax1.axvline(atm_position[0], color="red", linestyle="--", label=f"Spot {spot}")
 
 # Merge legends
 lines, labels = ax1.get_legend_handles_labels()
@@ -496,43 +555,75 @@ ax1.set_title(f"OI, ChgOI & Volume for {symbol} ({itm_count} ITM each side)")
 st.pyplot(fig)
 
 # ----------------------------
-# Bucket summaries
+# Bucket summaries with calculated Greeks (No Tabs)
 # ----------------------------
 def flatten_block(block_df: pd.DataFrame) -> pd.DataFrame:
     out = []
     for _, r in block_df.iterrows():
         ce, pe = r["CE"], r["PE"]
+        
+        # Calculate Greeks for bucket analysis
+        strike_price = float(r["strikePrice"])
+        ce_iv = float(g(ce, "impliedVolatility")) / 100 if g(ce, "impliedVolatility") else 0.2
+        pe_iv = float(g(pe, "impliedVolatility")) / 100 if g(pe, "impliedVolatility") else 0.2
+        
+        ce_greeks = calculate_greeks(spot, strike_price, time_to_expiry, risk_free_rate, ce_iv, 'call')
+        pe_greeks = calculate_greeks(spot, strike_price, time_to_expiry, risk_free_rate, pe_iv, 'put')
+        
         out.append({
-            "Strike": float(r["strikePrice"]),
+            "Strike": strike_price,
             "CE_OI": float(g(ce, "openInterest")),
             "CE_ChgOI": float(g(ce, "changeinOpenInterest")),
             "CE_Volume": float(g(ce, "totalTradedVolume")),
-            "CE_IV": float(g(ce, "impliedVolatility")),
+            "CE_IV": ce_iv * 100,
+            "CE_Delta": ce_greeks['delta'],
+            "CE_Gamma": ce_greeks['gamma'],
+            "CE_Theta": ce_greeks['theta'],
+            "CE_Vega": ce_greeks['vega'],
             "PE_OI": float(g(pe, "openInterest")),
             "PE_ChgOI": float(g(pe, "changeinOpenInterest")),
             "PE_Volume": float(g(pe, "totalTradedVolume")),
-            "PE_IV": float(g(pe, "impliedVolatility")),
+            "PE_IV": pe_iv * 100,
+            "PE_Delta": pe_greeks['delta'],
+            "PE_Gamma": pe_greeks['gamma'],
+            "PE_Theta": pe_greeks['theta'],
+            "PE_Vega": pe_greeks['vega'],
         })
     return pd.DataFrame(out)
 
 below_block = flatten_block(below_df)
 above_block = flatten_block(above_df)
 
-def agg_side(df_in: pd.DataFrame, side: str):
+def agg_side_with_greeks(df_in: pd.DataFrame, side: str):
     if df_in.empty:
-        return {"OI": 0, "ChgOI": 0, "Volume": 0, "IV": 0}
+        return {"OI": 0, "ChgOI": 0, "Volume": 0, "IV": 0, "Delta": 0, "Gamma": 0, "Theta": 0, "Vega": 0}
+    
+    # Weight Greeks by OI for more meaningful aggregation
+    total_oi = df_in[f"{side}_OI"].sum()
+    if total_oi == 0:
+        return {"OI": 0, "ChgOI": 0, "Volume": 0, "IV": 0, "Delta": 0, "Gamma": 0, "Theta": 0, "Vega": 0}
+    
+    weighted_delta = (df_in[f"{side}_Delta"] * df_in[f"{side}_OI"]).sum() / total_oi
+    weighted_gamma = (df_in[f"{side}_Gamma"] * df_in[f"{side}_OI"]).sum() / total_oi
+    weighted_theta = (df_in[f"{side}_Theta"] * df_in[f"{side}_OI"]).sum() / total_oi
+    weighted_vega = (df_in[f"{side}_Vega"] * df_in[f"{side}_OI"]).sum() / total_oi
+    
     return {
         "OI": df_in[f"{side}_OI"].sum(),
         "ChgOI": df_in[f"{side}_ChgOI"].sum(),
         "Volume": df_in[f"{side}_Volume"].sum(),
         "IV": df_in[f"{side}_IV"].mean() if not df_in[f"{side}_IV"].empty else 0,
+        "Delta": weighted_delta,
+        "Gamma": weighted_gamma,
+        "Theta": weighted_theta,
+        "Vega": weighted_vega,
     }
 
 bucket_summary = {
-    "CE_ITM": agg_side(below_block, "CE"),
-    "CE_OTM": agg_side(above_block, "CE"),
-    "PE_ITM": agg_side(above_block, "PE"),
-    "PE_OTM": agg_side(below_block, "PE"),
+    "CE_ITM": agg_side_with_greeks(below_block, "CE"),
+    "CE_OTM": agg_side_with_greeks(above_block, "CE"),
+    "PE_ITM": agg_side_with_greeks(above_block, "PE"),
+    "PE_OTM": agg_side_with_greeks(below_block, "PE"),
 }
 
 # Calculate PCR values for OI, ChgOI, and Volume
@@ -569,10 +660,12 @@ pcr_data = {
 }
 
 # ----------------------------
-# Show summaries with enhanced PCR
+# Enhanced Bucket Summaries with Greeks Analysis (No Tabs)
 # ----------------------------
-st.subheader(f"Bucket Summaries ({itm_count} ITM each side)")
-left, middle, right = st.columns([2, 2, 2])
+st.subheader(f"Enhanced Bucket Summaries with Greeks Analysis ({itm_count} ITM each side)")
+
+# Basic Metrics and Greeks Analysis combined
+left, middle, right = st.columns([1, 1, 1])
 
 with left:
     st.markdown("### Calls (CE)")
@@ -581,14 +674,22 @@ with left:
     st.markdown(f"OI: {trend_badge(bucket_summary['CE_ITM']['OI'], None if not prev else prev['OI'])}", unsafe_allow_html=True)
     st.markdown(f"ChgOI: {trend_badge(bucket_summary['CE_ITM']['ChgOI'], None if not prev else prev['ChgOI'])}", unsafe_allow_html=True)
     st.markdown(f"Volume: {trend_badge(bucket_summary['CE_ITM']['Volume'], None if not prev else prev['Volume'])}", unsafe_allow_html=True)
-    st.markdown(f"IV: {bucket_summary['CE_ITM']['IV']:.2f}")
+    st.markdown(f"IV: {bucket_summary['CE_ITM']['IV']:.2f}%")
+    st.markdown(f"Delta: {bucket_summary['CE_ITM']['Delta']:.4f}")
+    st.markdown(f"Gamma: {bucket_summary['CE_ITM']['Gamma']:.4f}")
+    st.markdown(f"Theta: {bucket_summary['CE_ITM']['Theta']:.4f}")
+    st.markdown(f"Vega: {bucket_summary['CE_ITM']['Vega']:.4f}")
 
     prev = st.session_state.prev_buckets["CE_OTM"] if st.session_state.prev_buckets else None
     st.markdown("**OTM (above spot)**")
     st.markdown(f"OI: {trend_badge(bucket_summary['CE_OTM']['OI'], None if not prev else prev['OI'])}", unsafe_allow_html=True)
     st.markdown(f"ChgOI: {trend_badge(bucket_summary['CE_OTM']['ChgOI'], None if not prev else prev['ChgOI'])}", unsafe_allow_html=True)
     st.markdown(f"Volume: {trend_badge(bucket_summary['CE_OTM']['Volume'], None if not prev else prev['Volume'])}", unsafe_allow_html=True)
-    st.markdown(f"IV: {bucket_summary['CE_OTM']['IV']:.2f}")
+    st.markdown(f"IV: {bucket_summary['CE_OTM']['IV']:.2f}%")
+    st.markdown(f"Delta: {bucket_summary['CE_OTM']['Delta']:.4f}")
+    st.markdown(f"Gamma: {bucket_summary['CE_OTM']['Gamma']:.4f}")
+    st.markdown(f"Theta: {bucket_summary['CE_OTM']['Theta']:.4f}")
+    st.markdown(f"Vega: {bucket_summary['CE_OTM']['Vega']:.4f}")
 
 with middle:
     st.markdown("### Puts (PE)")
@@ -597,79 +698,59 @@ with middle:
     st.markdown(f"OI: {trend_badge(bucket_summary['PE_ITM']['OI'], None if not prev else prev['OI'])}", unsafe_allow_html=True)
     st.markdown(f"ChgOI: {trend_badge(bucket_summary['PE_ITM']['ChgOI'], None if not prev else prev['ChgOI'])}", unsafe_allow_html=True)
     st.markdown(f"Volume: {trend_badge(bucket_summary['PE_ITM']['Volume'], None if not prev else prev['Volume'])}", unsafe_allow_html=True)
-    st.markdown(f"IV: {bucket_summary['PE_ITM']['IV']:.2f}")
+    st.markdown(f"IV: {bucket_summary['PE_ITM']['IV']:.2f}%")
+    st.markdown(f"Delta: {bucket_summary['PE_ITM']['Delta']:.4f}")
+    st.markdown(f"Gamma: {bucket_summary['PE_ITM']['Gamma']:.4f}")
+    st.markdown(f"Theta: {bucket_summary['PE_ITM']['Theta']:.4f}")
+    st.markdown(f"Vega: {bucket_summary['PE_ITM']['Vega']:.4f}")
 
     prev = st.session_state.prev_buckets["PE_OTM"] if st.session_state.prev_buckets else None
     st.markdown("**OTM (below spot)**")
     st.markdown(f"OI: {trend_badge(bucket_summary['PE_OTM']['OI'], None if not prev else prev['OI'])}", unsafe_allow_html=True)
     st.markdown(f"ChgOI: {trend_badge(bucket_summary['PE_OTM']['ChgOI'], None if not prev else prev['ChgOI'])}", unsafe_allow_html=True)
     st.markdown(f"Volume: {trend_badge(bucket_summary['PE_OTM']['Volume'], None if not prev else prev['Volume'])}", unsafe_allow_html=True)
-    st.markdown(f"IV: {bucket_summary['PE_OTM']['IV']:.2f}")
+    st.markdown(f"IV: {bucket_summary['PE_OTM']['IV']:.2f}%")
+    st.markdown(f"Delta: {bucket_summary['PE_OTM']['Delta']:.4f}")
+    st.markdown(f"Gamma: {bucket_summary['PE_OTM']['Gamma']:.4f}")
+    st.markdown(f"Theta: {bucket_summary['PE_OTM']['Theta']:.4f}")
+    st.markdown(f"Vega: {bucket_summary['PE_OTM']['Vega']:.4f}")
 
 with right:
-    st.markdown("### Enhanced PCR Analysis")
+    st.markdown("### PCR Analysis")
     
-    # Create tabs for different PCR types
-    tab1, tab2, tab3 = st.tabs(["OI PCR", "ChgOI PCR", "Volume PCR"])
+    st.markdown("""
+    <div style="background-color:#f8f9fa;padding:10px;border-radius:8px;border-left:4px solid #0A71E2;">
+        <div style="font-weight:600;color:#0A71E2;margin-bottom:5px;">Open Interest PCR</div>
+    </div>
+    """, unsafe_allow_html=True)
     
-    with tab1:
-        st.markdown("""
-        <div style="background-color:#f8f9fa;padding:10px;border-radius:8px;border-left:4px solid #0A71E2;">
-            <div style="font-weight:600;color:#0A71E2;margin-bottom:5px;">Open Interest PCR</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_OI']:.3f}")
-        st.markdown(get_pcr_signal(pcr_data['OVERALL_PCR_OI'], "OI"))
-        
-        st.markdown(f"**ITM:** {pcr_data['ITM_PCR_OI']:.3f}")
-        st.markdown(f"**OTM:** {pcr_data['OTM_PCR_OI']:.3f}")
-        
-        st.markdown("**Cross Ratios:**")
-        st.caption(f"PUT OTM/CE ITM: {pcr_data['PUT_OTM_CALL_ITM_PCR_OI']:.3f}")
-        st.caption(f"PUT ITM/CE OTM: {pcr_data['PUT_ITM_CALL_OTM_PCR_OI']:.3f}")
+    st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_OI']:.3f}")
+    st.markdown(get_pcr_signal(pcr_data['OVERALL_PCR_OI'], "OI"))
     
-    with tab2:
-        st.markdown("""
-        <div style="background-color:#fff3e0;padding:10px;border-radius:8px;border-left:4px solid #ff9800;">
-            <div style="font-weight:600;color:#ff9800;margin-bottom:5px;">Change in OI PCR</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_CHGOI']:.3f}")
-        st.markdown(get_pcr_signal(pcr_data['OVERALL_PCR_CHGOI'], "ChgOI"))
-        
-        st.markdown(f"**ITM:** {pcr_data['ITM_PCR_CHGOI']:.3f}")
-        st.markdown(f"**OTM:** {pcr_data['OTM_PCR_CHGOI']:.3f}")
-        
-        st.markdown("**Cross Ratios:**")
-        st.caption(f"PUT OTM/CE ITM: {pcr_data['PUT_OTM_CALL_ITM_PCR_CHGOI']:.3f}")
-        st.caption(f"PUT ITM/CE OTM: {pcr_data['PUT_ITM_CALL_OTM_PCR_CHGOI']:.3f}")
-        
-        st.caption("📈 Shows recent position changes (Lower=Bearish, Higher=Bullish)")
+    st.markdown(f"**ITM:** {pcr_data['ITM_PCR_OI']:.3f}")
+    st.markdown(f"**OTM:** {pcr_data['OTM_PCR_OI']:.3f}")
     
-    with tab3:
-        st.markdown("""
-        <div style="background-color:#e8f5e8;padding:10px;border-radius:8px;border-left:4px solid #4caf50;">
-            <div style="font-weight:600;color:#4caf50;margin-bottom:5px;">Volume PCR</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_VOLUME']:.3f}")
-        st.markdown(get_pcr_signal(pcr_data['OVERALL_PCR_VOLUME'], "Volume"))
-        
-        st.markdown(f"**ITM:** {pcr_data['ITM_PCR_VOLUME']:.3f}")
-        st.markdown(f"**OTM:** {pcr_data['OTM_PCR_VOLUME']:.3f}")
-        
-        st.markdown("**Cross Ratios:**")
-        st.caption(f"PUT OTM/CE ITM: {pcr_data['PUT_OTM_CALL_ITM_PCR_VOLUME']:.3f}")
-        st.caption(f"PUT ITM/CE OTM: {pcr_data['PUT_ITM_CALL_OTM_PCR_VOLUME']:.3f}")
-        
-        st.caption("📊 Shows current session activity")
+    st.markdown("""
+    <div style="background-color:#fff3e0;padding:10px;border-radius:8px;border-left:4px solid #ff9800;margin-top:10px;">
+        <div style="font-weight:600;color:#ff9800;margin-bottom:5px;">Change in OI PCR</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_CHGOI']:.3f}")
+    st.markdown(get_pcr_signal(pcr_data['OVERALL_PCR_CHGOI'], "ChgOI"))
+    
+    st.markdown("""
+    <div style="background-color:#e8f5e8;padding:10px;border-radius:8px;border-left:4px solid #4caf50;margin-top:10px;">
+        <div style="font-weight:600;color:#4caf50;margin-bottom:5px;">Volume PCR</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_VOLUME']:.3f}")
+    st.markdown(get_pcr_signal(pcr_data['OVERALL_PCR_VOLUME'], "Volume"))
 
 
 # ----------------------------
-# Intelligent Sentiment Analysis
+# Intelligent Sentiment Analysis (Simplified)
 # ----------------------------
 st.markdown("---")
 st.subheader("🧠 Intelligent Market Sentiment Analysis")
@@ -707,7 +788,7 @@ sentiment_icons = {
 sentiment_color = sentiment_colors.get(sentiment_analysis["sentiment"], "#6b7280")
 sentiment_icon = sentiment_icons.get(sentiment_analysis["sentiment"], "📊")
 
-# Main sentiment card with score
+# Main sentiment card with score (Simplified)
 score_color = sentiment_color
 if sentiment_analysis["final_score"] > 0:
     score_bg = f"linear-gradient(90deg, #f0f0f0 50%, {sentiment_color}30 100%)"
@@ -740,80 +821,160 @@ st.markdown(f"""
             <small style="color: #666; font-weight: 600;">Sentiment Score</small>
         </div>
     </div>
-    <p style="font-size: 1.1em; margin: 10px 0; color: #444;">
-        <strong>Analysis:</strong> {sentiment_analysis["description"]}
-    </p>
-    <p style="font-size: 1em; margin: 10px 0; color: #666; background-color: rgba(255,255,255,0.7); 
-              padding: 10px; border-radius: 8px;">
-        <strong>Strategy:</strong> {sentiment_analysis["action_suggestion"]}
-    </p>
 </div>
 """, unsafe_allow_html=True)
 
-# Detailed Score Breakdown
+# Score Breakdown Analysis (Simplified - No score scale)
 st.markdown("### 📊 Score Breakdown Analysis")
 
-score_col1, score_col2 = st.columns([2, 1])
-
-with score_col1:
-    st.markdown("#### Component Scores")
-    for component, description in sentiment_analysis["score_breakdown"].items():
-        score_val = sentiment_analysis["component_scores"][component]
-        
-        if score_val > 20:
-            bar_color = "#4caf50"
-            text_color = "#2e7d32"
-        elif score_val > 0:
-            bar_color = "#8bc34a" 
-            text_color = "#558b2f"
-        elif score_val < -20:
-            bar_color = "#f44336"
-            text_color = "#c62828"
-        elif score_val < 0:
-            bar_color = "#ff5722"
-            text_color = "#d84315"
-        else:
-            bar_color = "#9e9e9e"
-            text_color = "#424242"
-        
-        # Create a visual bar for the score
-        bar_width = abs(score_val)
-        bar_direction = "right" if score_val >= 0 else "left"
-        
-        component_name = component.replace('_', ' ').title()
-        
-        st.markdown(f"""
-        <div style="margin: 10px 0; padding: 10px; border-radius: 8px; background-color: #f8f9fa;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
-                <strong style="color: {text_color};">{component_name}</strong>
-                <span style="color: {text_color}; font-weight: 600;">{score_val:+.1f}</span>
-            </div>
-            <div style="background-color: #e0e0e0; height: 6px; border-radius: 3px; position: relative;">
-                <div style="background-color: {bar_color}; height: 6px; border-radius: 3px; 
-                           width: {bar_width}%; float: {'right' if score_val < 0 else 'left'};"></div>
-            </div>
-            <small style="color: #666;">{description.split('(Weight:')[1][:-1]} weight</small>
+st.markdown("#### Component Scores")
+for component, description in sentiment_analysis["score_breakdown"].items():
+    score_val = sentiment_analysis["component_scores"][component]
+    
+    if score_val > 20:
+        bar_color = "#4caf50"
+        text_color = "#2e7d32"
+    elif score_val > 0:
+        bar_color = "#8bc34a" 
+        text_color = "#558b2f"
+    elif score_val < -20:
+        bar_color = "#f44336"
+        text_color = "#c62828"
+    elif score_val < 0:
+        bar_color = "#ff5722"
+        text_color = "#d84315"
+    else:
+        bar_color = "#9e9e9e"
+        text_color = "#424242"
+    
+    # Create a visual bar for the score
+    bar_width = abs(score_val)
+    
+    component_name = component.replace('_', ' ').title()
+    
+    st.markdown(f"""
+    <div style="margin: 10px 0; padding: 10px; border-radius: 8px; background-color: #f8f9fa;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+            <strong style="color: {text_color};">{component_name}</strong>
+            <span style="color: {text_color}; font-weight: 600;">{score_val:+.1f}</span>
         </div>
-        """, unsafe_allow_html=True)
-
-with score_col2:
-    st.markdown("#### Score Scale")
-    st.markdown("""
-    <div style="padding: 15px; border-radius: 10px; background-color: #f8f9fa;">
-        <div style="margin: 5px 0; color: #2e7d32; font-weight: 600;">+60 to +100: Strong Bullish</div>
-        <div style="margin: 5px 0; color: #558b2f; font-weight: 600;">+30 to +60: Bullish</div>
-        <div style="margin: 5px 0; color: #8bc34a; font-weight: 600;">+15 to +30: Bullish Bias</div>
-        <div style="margin: 5px 0; color: #424242; font-weight: 600;">-15 to +15: Neutral</div>
-        <div style="margin: 5px 0; color: #d84315; font-weight: 600;">-30 to -15: Bearish Bias</div>
-        <div style="margin: 5px 0; color: #c62828; font-weight: 600;">-60 to -30: Bearish</div>
-        <div style="margin: 5px 0; color: #b71c1c; font-weight: 600;">-100 to -60: Strong Bearish</div>
+        <div style="background-color: #e0e0e0; height: 6px; border-radius: 3px; position: relative;">
+            <div style="background-color: {bar_color}; height: 6px; border-radius: 3px; 
+                       width: {bar_width}%; float: {'right' if score_val < 0 else 'left'};"></div>
+        </div>
+        <small style="color: #666;">{description.split('(Weight:')[1][:-1]} weight</small>
     </div>
     """, unsafe_allow_html=True)
 
 # ----------------------------
-# Table view
+# Option Chain Table with Column Selection
 # ----------------------------
-st.subheader(f"Option Chain Table ({itm_count} ITM each side)")
+st.subheader(f"Option Chain Table with Calculated Greeks ({itm_count} ITM each side)")
+
+# Column selection interface
+all_columns = [
+    "CE_OI", "CE_LTP", "CE_Change", "CE_Volume", "CE_ChgOI", "CE_IV", 
+    "CE_Delta", "CE_Gamma", "CE_Theta", "CE_Vega", "CE_Position",
+    "Strike",
+    "PE_Position", "PE_Vega", "PE_Theta", "PE_Gamma", "PE_Delta",
+    "PE_IV", "PE_ChgOI", "PE_Volume", "PE_Change", "PE_LTP", "PE_OI",
+    "PCR_Strike_OI", "PCR_Volume", "PCR_ChgOI"
+]
+
+default_columns = [
+    "CE_OI", "CE_LTP", "CE_Change", "CE_Volume", "CE_ChgOI", "CE_Position",
+    "Strike",
+    "PE_Position", "PE_ChgOI", "PE_Volume", "PE_Change", "PE_LTP", "PE_OI"
+]
+
+# Column selection expander
+with st.expander("🔧 Select Table Columns", expanded=False):
+    col_selection_col1, col_selection_col2, col_selection_col3 = st.columns(3)
+    
+    with col_selection_col1:
+        st.markdown("**Basic Metrics**")
+        show_oi = st.checkbox("Open Interest", value=True)
+        show_ltp = st.checkbox("Last Price", value=True)
+        show_change = st.checkbox("Price Change", value=True)
+        show_volume = st.checkbox("Volume", value=True)
+        show_chgoi = st.checkbox("Change in OI", value=True)
+        show_position = st.checkbox("Position Type", value=True)
+        
+    with col_selection_col2:
+        st.markdown("**Greeks & IV**")
+        show_iv = st.checkbox("Implied Volatility", value=False)
+        show_delta = st.checkbox("Delta", value=False)
+        show_gamma = st.checkbox("Gamma", value=False)
+        show_theta = st.checkbox("Theta", value=False)
+        show_vega = st.checkbox("Vega", value=False)
+        
+    with col_selection_col3:
+        st.markdown("**PCR Ratios**")
+        show_pcr_oi = st.checkbox("PCR Strike OI", value=False)
+        show_pcr_volume = st.checkbox("PCR Volume", value=False)
+        show_pcr_chgoi = st.checkbox("PCR ChgOI", value=False)
+
+# Build selected columns list
+selected_columns = []
+
+# CE columns
+if show_oi:
+    selected_columns.append("CE_OI")
+if show_ltp:
+    selected_columns.append("CE_LTP")
+if show_change:
+    selected_columns.append("CE_Change")
+if show_volume:
+    selected_columns.append("CE_Volume")
+if show_chgoi:
+    selected_columns.append("CE_ChgOI")
+if show_iv:
+    selected_columns.append("CE_IV")
+if show_delta:
+    selected_columns.append("CE_Delta")
+if show_gamma:
+    selected_columns.append("CE_Gamma")
+if show_theta:
+    selected_columns.append("CE_Theta")
+if show_vega:
+    selected_columns.append("CE_Vega")
+if show_position:
+    selected_columns.append("CE_Position")
+
+# Strike (always included)
+selected_columns.append("Strike")
+
+# PE columns (reverse order for better display)
+if show_position:
+    selected_columns.append("PE_Position")
+if show_vega:
+    selected_columns.append("PE_Vega")
+if show_theta:
+    selected_columns.append("PE_Theta")
+if show_gamma:
+    selected_columns.append("PE_Gamma")
+if show_delta:
+    selected_columns.append("PE_Delta")
+if show_iv:
+    selected_columns.append("PE_IV")
+if show_chgoi:
+    selected_columns.append("PE_ChgOI")
+if show_volume:
+    selected_columns.append("PE_Volume")
+if show_change:
+    selected_columns.append("PE_Change")
+if show_ltp:
+    selected_columns.append("PE_LTP")
+if show_oi:
+    selected_columns.append("PE_OI")
+
+# PCR columns
+if show_pcr_oi:
+    selected_columns.append("PCR_Strike_OI")
+if show_pcr_volume:
+    selected_columns.append("PCR_Volume")
+if show_pcr_chgoi:
+    selected_columns.append("PCR_ChgOI")
 
 atm_row_idx = table.index[table["Strike"] == atm_strike]
 atm_row_idx = int(atm_row_idx[0]) if len(atm_row_idx) else None
@@ -834,14 +995,6 @@ def cell_green(val, max_val):
     except:
         return ""
 
-# Reorder table columns for better readability
-table_display = table[[
-    "CE_OI", "CE_LTP", "CE_Change", "CE_Volume", "CE_ChgOI", "CE_IV", "CE_Position",
-    "Strike",
-    "PE_Position", "PE_IV", "PE_ChgOI", "PE_Volume", "PE_Change", "PE_LTP", "PE_OI",
-    "PCR_Strike_OI", "PCR_Volume", "PCR_ChgOI"
-]]
-
 # Function to format numbers in K/L/Cr format for table
 def format_table_number(num):
     """Format numbers for table display in K/L/Cr format"""
@@ -857,31 +1010,91 @@ def format_table_number(num):
     else:
         return f"{num:.0f}" if num == int(num) else f"{num:.2f}"
 
+# Display table with selected columns
+table_display = table[selected_columns]
+
 styled = (
     table_display.style
     .apply(row_highlight, axis=1)
-    .applymap(lambda v: cell_green(v, ce_oi_max), subset=["CE_OI"])
-    .applymap(lambda v: cell_green(v, ce_vol_max), subset=["CE_Volume"])
-    .applymap(lambda v: cell_green(v, pe_oi_max), subset=["PE_OI"])
-    .applymap(lambda v: cell_green(v, pe_vol_max), subset=["PE_Volume"])
-    .applymap(position_color_style, subset=["CE_Position", "PE_Position"])
-    .format({
-        "CE_OI": format_table_number, "CE_LTP": "{:,.2f}", "CE_Change": "{:+.2f}",
-        "CE_Volume": format_table_number, "CE_ChgOI": format_table_number, "CE_IV": "{:.2f}",
-        "Strike": "{:,.0f}",
-        "PE_OI": format_table_number, "PE_LTP": "{:,.2f}", "PE_Change": "{:+.2f}",
-        "PE_Volume": format_table_number, "PE_ChgOI": format_table_number, "PE_IV": "{:.2f}",
-        "PCR_Strike_OI": "{:.3f}", "PCR_Volume": "{:.3f}", "PCR_ChgOI": "{:.3f}"
-    })
 )
+
+# Apply conditional formatting based on selected columns
+if "CE_OI" in selected_columns:
+    styled = styled.applymap(lambda v: cell_green(v, ce_oi_max), subset=["CE_OI"])
+if "CE_Volume" in selected_columns:
+    styled = styled.applymap(lambda v: cell_green(v, ce_vol_max), subset=["CE_Volume"])
+if "PE_OI" in selected_columns:
+    styled = styled.applymap(lambda v: cell_green(v, pe_oi_max), subset=["PE_OI"])
+if "PE_Volume" in selected_columns:
+    styled = styled.applymap(lambda v: cell_green(v, pe_vol_max), subset=["PE_Volume"])
+
+# Apply position coloring if position columns are selected
+position_columns = [col for col in selected_columns if col in ["CE_Position", "PE_Position"]]
+if position_columns:
+    styled = styled.applymap(position_color_style, subset=position_columns)
+
+# Format columns based on selection
+format_dict = {}
+if "CE_OI" in selected_columns:
+    format_dict["CE_OI"] = format_table_number
+if "CE_LTP" in selected_columns:
+    format_dict["CE_LTP"] = "{:,.2f}"
+if "CE_Change" in selected_columns:
+    format_dict["CE_Change"] = "{:+.2f}"
+if "CE_Volume" in selected_columns:
+    format_dict["CE_Volume"] = format_table_number
+if "CE_ChgOI" in selected_columns:
+    format_dict["CE_ChgOI"] = format_table_number
+if "CE_IV" in selected_columns:
+    format_dict["CE_IV"] = "{:.1f}%"
+if "CE_Delta" in selected_columns:
+    format_dict["CE_Delta"] = "{:.4f}"
+if "CE_Gamma" in selected_columns:
+    format_dict["CE_Gamma"] = "{:.4f}"
+if "CE_Theta" in selected_columns:
+    format_dict["CE_Theta"] = "{:.4f}"
+if "CE_Vega" in selected_columns:
+    format_dict["CE_Vega"] = "{:.4f}"
+
+format_dict["Strike"] = "{:,.0f}"
+
+if "PE_OI" in selected_columns:
+    format_dict["PE_OI"] = format_table_number
+if "PE_LTP" in selected_columns:
+    format_dict["PE_LTP"] = "{:,.2f}"
+if "PE_Change" in selected_columns:
+    format_dict["PE_Change"] = "{:+.2f}"
+if "PE_Volume" in selected_columns:
+    format_dict["PE_Volume"] = format_table_number
+if "PE_ChgOI" in selected_columns:
+    format_dict["PE_ChgOI"] = format_table_number
+if "PE_IV" in selected_columns:
+    format_dict["PE_IV"] = "{:.1f}%"
+if "PE_Delta" in selected_columns:
+    format_dict["PE_Delta"] = "{:.4f}"
+if "PE_Gamma" in selected_columns:
+    format_dict["PE_Gamma"] = "{:.4f}"
+if "PE_Theta" in selected_columns:
+    format_dict["PE_Theta"] = "{:.4f}"
+if "PE_Vega" in selected_columns:
+    format_dict["PE_Vega"] = "{:.4f}"
+
+if "PCR_Strike_OI" in selected_columns:
+    format_dict["PCR_Strike_OI"] = "{:.3f}"
+if "PCR_Volume" in selected_columns:
+    format_dict["PCR_Volume"] = "{:.3f}"
+if "PCR_ChgOI" in selected_columns:
+    format_dict["PCR_ChgOI"] = "{:.3f}"
+
+styled = styled.format(format_dict)
 
 st.dataframe(styled, use_container_width=True)
 
-# Summary statistics
+# Enhanced Quick Stats
 st.markdown("---")
-st.subheader("📈 Quick Stats")
+st.subheader("Enhanced Quick Stats")
 
-stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+stats_col1, stats_col2, stats_col3, stats_col4, stats_col5 = st.columns(5)
 
 with stats_col1:
     st.metric("Total CE OI", format_number(table["CE_OI"].sum()))
@@ -890,7 +1103,9 @@ with stats_col2:
     st.metric("Total PE OI", format_number(table["PE_OI"].sum()))
     
 with stats_col3:
-    st.metric("Max Pain Strike", f"{table.loc[table['CE_OI'].idxmax(), 'Strike']:,.0f}")
+    max_pain_idx = (table["CE_OI"] + table["PE_OI"]).idxmax()
+    max_pain_strike = table.loc[max_pain_idx, "Strike"]
+    st.metric("Max Pain Strike", f"{max_pain_strike:,.0f}")
     
 with stats_col4:
     total_ce_vol = table["CE_Volume"].sum()
@@ -898,5 +1113,23 @@ with stats_col4:
     volume_pcr = total_pe_vol / total_ce_vol if total_ce_vol > 0 else 0
     st.metric("Total Volume PCR", f"{volume_pcr:.3f}")
 
+with stats_col5:
+    # Calculate portfolio delta
+    total_ce_oi = table["CE_OI"].sum()
+    total_pe_oi = table["PE_OI"].sum()
+    total_oi = total_ce_oi + total_pe_oi
+    
+    if total_oi > 0:
+        portfolio_delta = ((table["CE_Delta"] * table["CE_OI"]).sum() + 
+                          (table["PE_Delta"] * table["PE_OI"]).sum()) / total_oi
+    else:
+        portfolio_delta = 0
+    
+    st.metric("Portfolio Delta", f"{portfolio_delta:+.3f}")
+
+# Update session state for next refresh
+st.session_state.prev_buckets = bucket_summary
+
 st.markdown("---")
 st.caption(f"Data refreshed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Snapshot saved: {save_path}")
+st.caption("**Note:** Greeks values are calculated using Black-Scholes formula with NSE implied volatility data.")
