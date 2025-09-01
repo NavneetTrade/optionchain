@@ -648,7 +648,7 @@ plt.tight_layout()
 st.pyplot(fig)
 
 # Create Delta Histogram Table
-st.subheader("Strike-wise Delta Distribution")
+#st.subheader("Strike-wise Delta Distribution")
 
 # Prepare the data in the desired format
 delta_hist_data = {
