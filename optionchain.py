@@ -108,9 +108,23 @@ def trend_badge(curr: float, prev: Optional[float]) -> str:
         return f"<span style='color:#dc2626;font-weight:600'>▼ {format_number(curr)}</span>"
     return f"<span style='color:#6b7280'>• {format_number(curr)}</span>"
 
-def calculate_pcr(put_value: float, call_value: float) -> float:
-    """Calculate Put-Call Ratio"""
-    return put_value / call_value if call_value != 0 else 0
+def calculate_pcr(put_value: float, call_value: float, pcr_type: str = 'standard') -> float:
+    """
+    Calculate Put-Call Ratio with different calculation methods
+    pcr_type: 'standard' for regular PCR, 'itm' for ITM PCR, 'otm' for OTM PCR
+    """
+    if call_value == 0:
+        return 0
+        
+    if pcr_type == 'standard':
+        return put_value / call_value
+    elif pcr_type in ['itm', 'otm']:
+        # For ITM and OTM ratios, we might want to weight the ratio differently
+        # or apply different thresholds based on moneyness
+        pcr = put_value / call_value
+        return pcr
+    else:
+        return put_value / call_value
 
 def get_position_signal(ltp: float, change: float, chg_oi: float) -> str:
     """Determine position type based on price change and change in OI"""
@@ -157,7 +171,39 @@ def position_color_style(val):
     color = get_position_color(val)
     return f'background-color: {color}20; color: {color}; font-weight: bold'
 
-def get_pcr_signal(pcr_value: float, metric_type: str = "OI") -> str:
+def get_activity_description(ce_chgoi: float, pe_chgoi: float, ce_oi: float = 0, pe_oi: float = 0, pcr: float = 0) -> str:
+    """Get detailed description of change in OI activity with dynamic thresholds"""
+    description = []
+    
+    # Calculate percentage changes
+    ce_chgoi_percent = (ce_chgoi / ce_oi * 100) if ce_oi != 0 else 0
+    pe_chgoi_percent = (pe_chgoi / pe_oi * 100) if pe_oi != 0 else 0
+    
+    if ce_chgoi < 0:
+        if abs(ce_chgoi_percent) > 5 and abs(pcr) > 2:
+            magnitude = "Very Heavy"
+        elif abs(ce_chgoi_percent) > 3 and abs(pcr) > 1.5:
+            magnitude = "Heavy"
+        elif abs(ce_chgoi_percent) > 1 and abs(pcr) > 1:
+            magnitude = "Moderate"
+        else:
+            magnitude = "Light"
+        description.append(f"{magnitude} Call Unwinding ({abs(ce_chgoi_percent):.1f}%)")
+        
+    if pe_chgoi < 0:
+        if abs(pe_chgoi_percent) > 5 and abs(pcr) > 2:
+            magnitude = "Very Heavy"
+        elif abs(pe_chgoi_percent) > 3 and abs(pcr) > 1.5:
+            magnitude = "Heavy"
+        elif abs(pe_chgoi_percent) > 1 and abs(pcr) > 1:
+            magnitude = "Moderate"
+        else:
+            magnitude = "Light"
+        description.append(f"{magnitude} Put Unwinding ({abs(pe_chgoi_percent):.1f}%)")
+        
+    return " & ".join(description) if description else "No significant unwinding"
+
+def get_pcr_signal(pcr_value: float, metric_type: str = "OI", ce_chgoi: float = 0, pe_chgoi: float = 0) -> str:
     """Get PCR signal based on value and metric type"""
     if metric_type == "OI":
         if pcr_value > 1.2:
@@ -167,16 +213,25 @@ def get_pcr_signal(pcr_value: float, metric_type: str = "OI") -> str:
         else:
             return "➡️ **Neutral**"
     elif metric_type == "ChgOI":
-        if pcr_value > 1.5:
-            return "🔺 **Strong Bullish**"
-        elif pcr_value > 1.0:
-            return "🔺 **Bullish**"
-        elif pcr_value < 0.5:
-            return "🔻 **Strong Bearish**"
-        elif pcr_value < 1.0:
-            return "🔻 **Bearish**"
-        else:
-            return "➡️ **Neutral**"
+        # New logic for Change in OI PCR
+        if pcr_value < 0:  # Negative PCR
+            if ce_chgoi < 0:  # Call side unwinding
+                return "🔺 **Bullish (Call Unwinding)**"
+            elif pe_chgoi < 0:  # Put side unwinding
+                return "🔺 **Bullish (Put Unwinding)**"
+            else:
+                return "➡️ **Neutral**"
+        else:  # Positive PCR
+            if pcr_value > 1.5:
+                return "🔺 **Strong Bullish**"
+            elif pcr_value > 1.0:
+                return "🔺 **Bullish**"
+            elif pcr_value < 0.5:
+                return "🔻 **Strong Bearish**"
+            elif pcr_value < 1.0:
+                return "🔻 **Bearish**"
+            else:
+                return "➡️ **Neutral**"
     else:  # Volume
         if pcr_value > 1.3:
             return "🔻 **Bearish**"
@@ -255,20 +310,55 @@ def calculate_comprehensive_sentiment_score(table_data, bucket_summary, pcr_data
     # 3. FRESH ACTIVITY ANALYSIS (25% weight)
     activity_score = 0
     
-    # Change in OI PCR (CRITICAL - reversed logic)
+    # Change in OI PCR with dynamic logic
     chgoi_pcr = pcr_data['OVERALL_PCR_CHGOI']
-    if chgoi_pcr > 2.0:
-        activity_score += 50  # Heavy put unwinding = bullish
-    elif chgoi_pcr > 1.5:
-        activity_score += 30  # Moderate put unwinding = bullish
-    elif chgoi_pcr > 1.0:
-        activity_score += 10  # Slight put unwinding = slightly bullish
-    elif chgoi_pcr < 0.3:
-        activity_score -= 50  # Heavy call unwinding = bearish
-    elif chgoi_pcr < 0.6:
-        activity_score -= 30  # Moderate call unwinding = bearish
-    elif chgoi_pcr < 1.0:
-        activity_score -= 10  # Slight call unwinding = slightly bearish
+    total_ce_chgoi = bucket_summary["CE_ITM"]["ChgOI"] + bucket_summary["CE_OTM"]["ChgOI"]
+    total_pe_chgoi = bucket_summary["PE_ITM"]["ChgOI"] + bucket_summary["PE_OTM"]["ChgOI"]
+    total_ce_oi = bucket_summary["CE_ITM"]["OI"] + bucket_summary["CE_OTM"]["OI"]
+    total_pe_oi = bucket_summary["PE_ITM"]["OI"] + bucket_summary["PE_OTM"]["OI"]
+    
+    # Calculate percentage changes relative to total OI
+    ce_chgoi_percent = (total_ce_chgoi / total_ce_oi * 100) if total_ce_oi != 0 else 0
+    pe_chgoi_percent = (total_pe_chgoi / total_pe_oi * 100) if total_pe_oi != 0 else 0
+    
+    # New logic for Change in OI PCR scoring with dynamic thresholds
+    if chgoi_pcr < 0:  # Negative PCR
+        if total_ce_chgoi < 0:  # Call unwinding
+            chgoi_impact = abs(ce_chgoi_percent)  # Impact based on percentage change
+            activity_score += chgoi_impact * 2  # Base score from percentage impact
+            
+            # Dynamic thresholds based on PCR and percentage change
+            if chgoi_impact > 5 and abs(chgoi_pcr) > 2:
+                activity_score += 50  # Very heavy impact
+            elif chgoi_impact > 3 and abs(chgoi_pcr) > 1.5:
+                activity_score += 35  # Heavy impact
+            elif chgoi_impact > 1 and abs(chgoi_pcr) > 1:
+                activity_score += 20  # Moderate impact
+                
+        if total_pe_chgoi < 0:  # Put unwinding
+            chgoi_impact = abs(pe_chgoi_percent)  # Impact based on percentage change
+            activity_score += chgoi_impact * 2  # Base score from percentage impact
+            
+            # Dynamic thresholds based on PCR and percentage change
+            if chgoi_impact > 5 and abs(chgoi_pcr) > 2:
+                activity_score += 50  # Very heavy impact
+            elif chgoi_impact > 3 and abs(chgoi_pcr) > 1.5:
+                activity_score += 35  # Heavy impact
+            elif chgoi_impact > 1 and abs(chgoi_pcr) > 1:
+                activity_score += 20  # Moderate impact
+    else:  # Positive PCR
+        if chgoi_pcr > 2.0:
+            activity_score += 50  # Heavy put activity = bullish
+        elif chgoi_pcr > 1.5:
+            activity_score += 30  # Moderate put activity = bullish
+        elif chgoi_pcr > 1.0:
+            activity_score += 10  # Slight put activity = slightly bullish
+        elif chgoi_pcr < 0.3:
+            activity_score -= 50  # Heavy call activity = bearish
+        elif chgoi_pcr < 0.6:
+            activity_score -= 30  # Moderate call activity = bearish
+        elif chgoi_pcr < 1.0:
+            activity_score -= 10  # Slight call activity = slightly bearish
     
     # Volume PCR analysis
     vol_pcr = pcr_data['OVERALL_PCR_VOLUME']
@@ -525,6 +615,8 @@ fig, ax1 = plt.subplots(figsize=(14, 6))
 indices = np.arange(len(table))
 bar_width = 0.2
 
+# Plot for OI, ChgOI & Volume Distribution
+
 # Left axis → OI & ChgOI
 ax1.bar(indices - 0.2, table["CE_OI"], bar_width, color="#1f77b4", label="CE OI")
 ax1.bar(indices, table["PE_OI"], bar_width, color="#2ca02c", label="PE OI")
@@ -552,7 +644,148 @@ lines2, labels2 = ax2.get_legend_handles_labels()
 ax1.legend(lines + lines2, labels + labels2, ncol=3)
 
 ax1.set_title(f"OI, ChgOI & Volume for {symbol} ({itm_count} ITM each side)")
+plt.tight_layout()
 st.pyplot(fig)
+
+# Create Delta Histogram Table
+st.subheader("Strike-wise Delta Distribution")
+
+# Prepare the data in the desired format
+delta_hist_data = {
+    'Type': ['Call Delta', 'Put Delta'],
+    **{str(strike): [ce_delta, pe_delta] 
+       for strike, ce_delta, pe_delta in zip(table['Strike'], table['CE_Delta'], table['PE_Delta'])}
+}
+delta_hist_df = pd.DataFrame(delta_hist_data)
+
+# Function to style the delta values
+def style_delta_hist(val):
+    if pd.isna(val):
+        return ''
+    if isinstance(val, str) and val in ['Call Delta', 'Put Delta']:
+        return 'font-weight: bold; background-color: #f8f9fa'
+    color = '#4caf50' if val > 0 else '#f44336' if val < 0 else '#666666'
+    return f'color: {color}; font-weight: bold'
+
+# Format and style the table
+styled_delta_hist = (delta_hist_df.style
+    .format({col: '{:+.4f}' for col in delta_hist_df.columns if col != 'Type'})
+    .applymap(style_delta_hist))
+
+# Display the table with custom CSS to make it look like a histogram
+st.markdown("""
+<style>
+    .delta-hist {
+        font-family: monospace;
+    }
+    .delta-hist td, .delta-hist th {
+        text-align: center !important;
+        min-width: 80px !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.dataframe(styled_delta_hist, use_container_width=True, height=150)
+
+# ----------------------------
+# PCR Market Sentiment Analysis
+# ----------------------------
+def calculate_pcr_sentiment(pcr_data: dict) -> dict:
+    """
+    Calculate market sentiment from PCR data.
+    Returns:
+        {
+            "sentiment": str,
+            "confidence": str,
+            "final_score": float,
+            "component_scores": dict,
+            "signals": list of str
+        }
+    """
+    scores = {"OI": 0, "ChgOI": 0, "Volume": 0}
+    signals = []  # To store detailed signals
+
+    # --- Open Interest PCR ---
+    oi = pcr_data["OVERALL_PCR_OI"]
+    if oi < 0.6:
+        scores["OI"] += 20   # Bullish
+        signals.append("Heavy Call OI dominance")
+    elif oi < 0.8:
+        scores["OI"] += 10   # Slightly Bullish
+        signals.append("Moderate Call OI dominance")
+    elif oi > 1.4:
+        scores["OI"] -= 20   # Bearish
+        signals.append("Heavy Put OI dominance")
+    elif oi > 1.2:
+        scores["OI"] -= 10   # Slightly Bearish
+        signals.append("Moderate Put OI dominance")
+
+    # ITM/OTM balance
+    if pcr_data["ITM_PCR_OI"] < 0.2:
+        scores["OI"] += 15  # Call unwinding, bullish
+        signals.append("Strong ITM Call presence")
+    if pcr_data["OTM_PCR_OI"] > 1.2:
+        scores["OI"] -= 15  # Heavy OTM puts, bearish
+        signals.append("Heavy OTM Put positioning")
+
+    # --- Change in OI PCR ---
+    chgoi = pcr_data["OVERALL_PCR_CHGOI"]
+    if chgoi < 0:  # Negative PCR
+        if pcr_data["ITM_PCR_CHGOI"] < 0:
+            scores["ChgOI"] += 25  # Call unwinding → bullish
+            signals.append("ITM Call unwinding (Bullish)")
+        if pcr_data["OTM_PCR_CHGOI"] < 0:
+            scores["ChgOI"] += 20  # Put unwinding → bullish
+            signals.append("OTM Put unwinding (Bullish)")
+    else:
+        if chgoi > 1.0:
+            scores["ChgOI"] += 20  # Fresh put additions → bullish
+            signals.append("Fresh Put additions")
+        elif chgoi < 0.6:
+            scores["ChgOI"] -= 20  # Fresh call additions → bearish
+            signals.append("Fresh Call additions")
+
+    # --- Volume PCR ---
+    vol = pcr_data["OVERALL_PCR_VOLUME"]
+    if vol < 0.5:
+        scores["Volume"] += 25  # Heavy call activity → bullish
+        signals.append("Very high Call volume")
+    elif vol < 0.8:
+        scores["Volume"] += 15  # Moderate call activity
+        signals.append("Moderate Call volume")
+    elif vol > 2.0:
+        scores["Volume"] -= 25  # Heavy put activity → bearish
+        signals.append("Very high Put volume")
+    elif vol > 1.3:
+        scores["Volume"] -= 15
+        signals.append("Moderate Put volume")
+
+    if pcr_data["ITM_PCR_VOLUME"] < 0.2:
+        scores["Volume"] += 10  # Call activity ITM → bullish
+        signals.append("High ITM Call activity")
+
+    # --- Weighted Final Score ---
+    weights = {"OI": 0.35, "ChgOI": 0.35, "Volume": 0.30}
+    final_score = sum(scores[k] * weights[k] for k in scores)
+
+    # --- Sentiment Classification ---
+    if final_score >= 25:
+        sentiment = "BULLISH"
+        confidence = "HIGH" if final_score >= 40 else "MEDIUM"
+    elif final_score <= -25:
+        sentiment = "BEARISH"
+        confidence = "HIGH" if final_score <= -40 else "MEDIUM"
+    else:
+        sentiment = "NEUTRAL"
+        confidence = "MEDIUM"
+
+    return {
+        "sentiment": sentiment,
+        "confidence": confidence,
+        "final_score": round(final_score, 2),
+        "component_scores": scores,
+        "signals": signals
+    }
 
 # ----------------------------
 # Bucket summaries with calculated Greeks (No Tabs)
@@ -629,8 +862,8 @@ bucket_summary = {
 # Calculate PCR values for OI, ChgOI, and Volume
 pcr_data = {
     # OI PCRs
-    "ITM_PCR_OI": calculate_pcr(bucket_summary["PE_ITM"]["OI"], bucket_summary["CE_ITM"]["OI"]),
-    "OTM_PCR_OI": calculate_pcr(bucket_summary["PE_OTM"]["OI"], bucket_summary["CE_OTM"]["OI"]),
+    "ITM_PCR_OI": calculate_pcr(bucket_summary["PE_ITM"]["OI"], bucket_summary["CE_ITM"]["OI"], pcr_type='itm'),
+    "OTM_PCR_OI": calculate_pcr(bucket_summary["PE_OTM"]["OI"], bucket_summary["CE_OTM"]["OI"], pcr_type='otm'),
     "PUT_OTM_CALL_ITM_PCR_OI": calculate_pcr(bucket_summary["PE_OTM"]["OI"], bucket_summary["CE_ITM"]["OI"]),
     "PUT_ITM_CALL_OTM_PCR_OI": calculate_pcr(bucket_summary["PE_ITM"]["OI"], bucket_summary["CE_OTM"]["OI"]),
     "OVERALL_PCR_OI": calculate_pcr(
@@ -639,8 +872,8 @@ pcr_data = {
     ),
     
     # ChgOI PCRs
-    "ITM_PCR_CHGOI": calculate_pcr(bucket_summary["PE_ITM"]["ChgOI"], bucket_summary["CE_ITM"]["ChgOI"]),
-    "OTM_PCR_CHGOI": calculate_pcr(bucket_summary["PE_OTM"]["ChgOI"], bucket_summary["CE_OTM"]["ChgOI"]),
+    "ITM_PCR_CHGOI": calculate_pcr(bucket_summary["PE_ITM"]["ChgOI"], bucket_summary["CE_ITM"]["ChgOI"], pcr_type='itm'),
+    "OTM_PCR_CHGOI": calculate_pcr(bucket_summary["PE_OTM"]["ChgOI"], bucket_summary["CE_OTM"]["ChgOI"], pcr_type='otm'),
     "PUT_OTM_CALL_ITM_PCR_CHGOI": calculate_pcr(bucket_summary["PE_OTM"]["ChgOI"], bucket_summary["CE_ITM"]["ChgOI"]),
     "PUT_ITM_CALL_OTM_PCR_CHGOI": calculate_pcr(bucket_summary["PE_ITM"]["ChgOI"], bucket_summary["CE_OTM"]["ChgOI"]),
     "OVERALL_PCR_CHGOI": calculate_pcr(
@@ -649,14 +882,19 @@ pcr_data = {
     ),
     
     # Volume PCRs
-    "ITM_PCR_VOLUME": calculate_pcr(bucket_summary["PE_ITM"]["Volume"], bucket_summary["CE_ITM"]["Volume"]),
-    "OTM_PCR_VOLUME": calculate_pcr(bucket_summary["PE_OTM"]["Volume"], bucket_summary["CE_OTM"]["Volume"]),
+    "ITM_PCR_VOLUME": calculate_pcr(bucket_summary["PE_ITM"]["Volume"], bucket_summary["CE_ITM"]["Volume"], pcr_type='itm'),
+    "OTM_PCR_VOLUME": calculate_pcr(bucket_summary["PE_OTM"]["Volume"], bucket_summary["CE_OTM"]["Volume"], pcr_type='otm'),
     "PUT_OTM_CALL_ITM_PCR_VOLUME": calculate_pcr(bucket_summary["PE_OTM"]["Volume"], bucket_summary["CE_ITM"]["Volume"]),
     "PUT_ITM_CALL_OTM_PCR_VOLUME": calculate_pcr(bucket_summary["PE_ITM"]["Volume"], bucket_summary["CE_OTM"]["Volume"]),
     "OVERALL_PCR_VOLUME": calculate_pcr(
         bucket_summary["PE_ITM"]["Volume"] + bucket_summary["PE_OTM"]["Volume"],
         bucket_summary["CE_ITM"]["Volume"] + bucket_summary["CE_OTM"]["Volume"]
-    )
+    ),
+    
+    # Cross PCR calculations
+    "CROSS_PCR_OI": calculate_pcr(bucket_summary["PE_OTM"]["OI"], bucket_summary["CE_ITM"]["OI"]),
+    "CROSS_PCR_CHGOI": calculate_pcr(bucket_summary["PE_OTM"]["ChgOI"], bucket_summary["CE_ITM"]["ChgOI"]),
+    "CROSS_PCR_VOLUME": calculate_pcr(bucket_summary["PE_OTM"]["Volume"], bucket_summary["CE_ITM"]["Volume"])
 }
 
 # ----------------------------
@@ -724,11 +962,10 @@ with right:
     </div>
     """, unsafe_allow_html=True)
     
-    st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_OI']:.3f}")
-    st.markdown(get_pcr_signal(pcr_data['OVERALL_PCR_OI'], "OI"))
-    
-    st.markdown(f"**ITM:** {pcr_data['ITM_PCR_OI']:.3f}")
-    st.markdown(f"**OTM:** {pcr_data['OTM_PCR_OI']:.3f}")
+    st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_OI']:.3f} {get_pcr_signal(pcr_data['OVERALL_PCR_OI'], 'OI')}")
+    st.markdown(f"**ITM:** {pcr_data['ITM_PCR_OI']:.3f} {get_pcr_signal(pcr_data['ITM_PCR_OI'], 'OI')}")
+    st.markdown(f"**OTM:** {pcr_data['OTM_PCR_OI']:.3f} {get_pcr_signal(pcr_data['OTM_PCR_OI'], 'OI')}")
+    st.markdown(f"**Cross (Put OTM/Call ITM):** {pcr_data['CROSS_PCR_OI']:.3f}")
     
     st.markdown("""
     <div style="background-color:#fff3e0;padding:10px;border-radius:8px;border-left:4px solid #ff9800;margin-top:10px;">
@@ -736,8 +973,14 @@ with right:
     </div>
     """, unsafe_allow_html=True)
     
-    st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_CHGOI']:.3f}")
-    st.markdown(get_pcr_signal(pcr_data['OVERALL_PCR_CHGOI'], "ChgOI"))
+    # Calculate total CE and PE change in OI for each category
+    overall_ce_chgoi = bucket_summary["CE_ITM"]["ChgOI"] + bucket_summary["CE_OTM"]["ChgOI"]
+    overall_pe_chgoi = bucket_summary["PE_ITM"]["ChgOI"] + bucket_summary["PE_OTM"]["ChgOI"]
+    
+    st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_CHGOI']:.3f} {get_pcr_signal(pcr_data['OVERALL_PCR_CHGOI'], 'ChgOI', overall_ce_chgoi, overall_pe_chgoi)}")
+    st.markdown(f"**ITM:** {pcr_data['ITM_PCR_CHGOI']:.3f} {get_pcr_signal(pcr_data['ITM_PCR_CHGOI'], 'ChgOI', bucket_summary['CE_ITM']['ChgOI'], bucket_summary['PE_ITM']['ChgOI'])}")
+    st.markdown(f"**OTM:** {pcr_data['OTM_PCR_CHGOI']:.3f} {get_pcr_signal(pcr_data['OTM_PCR_CHGOI'], 'ChgOI', bucket_summary['CE_OTM']['ChgOI'], bucket_summary['PE_OTM']['ChgOI'])}")
+    st.markdown(f"**Cross (Put OTM/Call ITM):** {pcr_data['CROSS_PCR_CHGOI']:.3f} {get_pcr_signal(pcr_data['CROSS_PCR_CHGOI'], 'ChgOI', bucket_summary['CE_ITM']['ChgOI'], bucket_summary['PE_OTM']['ChgOI'])}")
     
     st.markdown("""
     <div style="background-color:#e8f5e8;padding:10px;border-radius:8px;border-left:4px solid #4caf50;margin-top:10px;">
@@ -745,8 +988,36 @@ with right:
     </div>
     """, unsafe_allow_html=True)
     
-    st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_VOLUME']:.3f}")
-    st.markdown(get_pcr_signal(pcr_data['OVERALL_PCR_VOLUME'], "Volume"))
+    st.markdown(f"**Overall:** {pcr_data['OVERALL_PCR_VOLUME']:.3f} {get_pcr_signal(pcr_data['OVERALL_PCR_VOLUME'], 'Volume')}")
+    st.markdown(f"**ITM:** {pcr_data['ITM_PCR_VOLUME']:.3f} {get_pcr_signal(pcr_data['ITM_PCR_VOLUME'], 'Volume')}")
+    st.markdown(f"**OTM:** {pcr_data['OTM_PCR_VOLUME']:.3f} {get_pcr_signal(pcr_data['OTM_PCR_VOLUME'], 'Volume')}")
+    st.markdown(f"**Cross (Put OTM/Call ITM):** {pcr_data['CROSS_PCR_VOLUME']:.3f}")
+    
+    # Add PCR-based Market Sentiment Analysis
+    st.markdown("""
+    <div style="background-color:#f0f7ff;padding:10px;border-radius:8px;border-left:4px solid #1976d2;margin-top:15px;margin-bottom:15px;">
+        <div style="font-weight:600;color:#1976d2;font-size:0.9em;margin-bottom:5px;">PCR-Based Market Sentiment</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Calculate PCR-based sentiment
+    pcr_sentiment = calculate_pcr_sentiment(pcr_data)
+    
+    # Display sentiment with appropriate color
+    sentiment_colors = {
+        "BULLISH": "#4caf50",
+        "BEARISH": "#f44336",
+        "NEUTRAL": "#ff9800"
+    }
+    sentiment_color = sentiment_colors.get(pcr_sentiment["sentiment"], "#666666")
+    
+    st.markdown(f"""
+    <div style="text-align:center;margin-top:5px;">
+        <span style="font-size:0.9em;color:{sentiment_color};font-weight:600;">
+            {pcr_sentiment["sentiment"]} (Confidence: {pcr_sentiment["confidence"]})
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ----------------------------
@@ -1089,6 +1360,8 @@ if "PCR_ChgOI" in selected_columns:
 styled = styled.format(format_dict)
 
 st.dataframe(styled, use_container_width=True)
+
+
 
 # Enhanced Quick Stats
 st.markdown("---")
