@@ -494,7 +494,7 @@ if AUTORFR and is_market_open():
 # ----------------------------
 # Fetch data
 # ----------------------------
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=300)
 def fetch_oc(sym: str):
     return nse_optionchain_scrapper(sym)
 
