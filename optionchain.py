@@ -483,7 +483,7 @@ with st.sidebar:
     # Use the session state symbol
     symbol = st.session_state.selected_symbol
     
-    itm_count = st.radio("ITM Strikes", [3, 5], index=1)
+    itm_count = st.radio("ITM Strikes", [1, 2, 3, 5], index=2)
     refresh_sec = st.slider("Auto-Refresh (sec)", 10, 60, 30)
     risk_free_rate = st.number_input("Risk-free Rate (%)", value=5.84, min_value=0.0, max_value=15.0, step=0.1) / 100
     st.caption("Install `streamlit-autorefresh` for auto refresh.")
